@@ -1,8 +1,91 @@
-{
-	"folders": [
-		{
-			"path": "."
-		}
-	],
-	"settings": {}
-}
+import pytesseract
+from pdf2image import convert_from_path
+from langchain.text_splitter import CharacterTextSplitter
+from langchain_community.vectorstores import FAISS
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
+from langchain_core.language_models import LLM
+from typing import Optional, List
+import requests
+
+# Path to tesseract (Update if yours is different)
+pytesseract.pytesseract.tesseract_cmd = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+
+#  Path to your PDF
+pdf_path = r"B.KDutta.pdf"
+
+#  Groq LLM setup
+class GroqLLM(LLM):
+    model: str
+    groq_api_key: str
+
+    @property
+    def _llm_type(self) -> str:
+        return "custom-groq"
+
+    def _call(self, prompt: str, stop: Optional[List[str]] = None, run_manager: Optional = None) -> str:
+        headers = {
+            "Authorization": f"Bearer {self.groq_api_key}",
+            "Content-Type": "application/json"
+        }
+        data = {
+            "model": self.model,
+            "messages": [{"role": "user", "content": prompt}]
+        }
+        response = requests.post("https://api.groq.com/openai/v1/chat/completions", headers=headers, json=data)
+        if response.status_code != 200:
+            raise Exception(f"Groq API Error: {response.text}")
+        return response.json()["choices"][0]["message"]["content"].strip()
+
+#  Load and OCR the PDF
+print(" Converting PDF to images...")
+images =convert_from_path(pdf_path)
+docs = []
+
+for i, img in enumerate(images):
+    text = pytesseract.image_to_string(img)
+    if text.strip():
+        docs.append({
+            "page_content": text,
+            "metadata": {"page": i}
+        })
+
+print(f" Extracted text from {len(docs)} pages.")
+
+# Chunk the documents
+splitter = CharacterTextSplitter(chunk_size=500, chunk_overlap=100)
+chunks = splitter.split_documents(docs)
+print(f"Number of chunks created: {len(chunks)}")
+
+if len(chunks) == 0:
+    print(" No chunks created. Please check your PDF and OCR results.")
+    exit()
+
+#  Create vector store
+embedding_model = HuggingFaceEmbeddings(model_name="all-MiniLM-L6-v2")
+vectorstore = FAISS.from_documents(chunks, embedding_model)
+
+
+GROQ_API_KEY = "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"
+llm = GroqLLM(model="mixtral-8x7b-32768", groq_api_key=GROQ_API_KEY)
+
+
+prompt = PromptTemplate(
+    input_variables=["question"],
+    template="You are an AI assistant. Use only the information from the PDF to answer:\n\nQuestion: {question}"
+)
+
+qa_chain = RetrievalQA.from_chain_type(
+    llm=llm,
+    retriever=vectorstore.as_retriever(),
+    chain_type_kwargs={"prompt": prompt}
+)
+
+while True:
+    query = input("\n Ask about the PDF (or type 'exit'): ")
+    if query.lower() in ['exit', 'quit']:
+        print(" Exiting chatbot.")
+        break
+    answer = qa_chain.run(query)
+    print(f"\n Answer: {answer}")
